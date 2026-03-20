@@ -148,14 +148,19 @@ def get_signals(user=Depends(get_current_user)):
             locked = plan_order.get(sig["plan_required"],0) > user_level
             results.append({
                 "id": fix["id"]*10+(1 if market=="over25" else 2),
-                "home_team": fix["home"], "away_team": fix["away"],
-                "league": fix["league"], "match_time": fix["time"],
-                "market": sig["market"], "odd": sig["odd"],
-                "confidence": sig["confidence"], "ev_pct": sig["ev_pct"],
+                "home_team": fix["home"],
+                "away_team": fix["away"],
+                "league": fix["league"],
+                "match_time": fix["time"],
+                "market": sig["market"],
+                "odd": sig["odd"],
+                "confidence": sig["confidence"],
+                "ev_pct": sig["ev_pct"],
                 "stake_pct": sig["stake_pct"],
-                "ai_explanation": sig["ai_explanation"] if not locked else None,
-                "shap_data": sig["shap_data"] if not locked else None,
-                "status": "pending", "plan_required": sig["plan_required"],
+                "ai_explanation": sig["ai_explanation"] if not locked else "Faça upgrade para ver a análise completa da IA.",
+                "shap_data": sig["shap_data"] if not locked else [],
+                "status": "pending",
+                "plan_required": sig["plan_required"],
                 "locked": locked,
             })
     results.sort(key=lambda x: x["confidence"], reverse=True)
@@ -167,14 +172,27 @@ def ranking(user=Depends(get_current_user)):
     results = []
     for fix in fixtures:
         sig = calc_signal(fix["hg"],fix["ag"],"over25",fix["home"],fix["away"])
-        results.append({"home_team":fix["home"],"away_team":fix["away"],
-                        "league":fix["league"],"market":sig["market"],
-                        "odd":sig["odd"],"confidence":sig["confidence"],"ev_pct":sig["ev_pct"]})
+        results.append({
+            "home_team": fix["home"],
+            "away_team": fix["away"],
+            "league": fix["league"],
+            "market": sig["market"],
+            "odd": sig["odd"],
+            "confidence": sig["confidence"],
+            "ev_pct": sig["ev_pct"]
+        })
     return sorted(results, key=lambda x: x["confidence"], reverse=True)[:10]
 
 @app.get("/signals/stats")
 def stats(user=Depends(get_current_user)):
-    return {"roi":23.4,"winrate":67.8,"total_signals_today":12,"greens_today":8,"total_today":9,"streak":6}
+    return {
+        "roi": 23.4,
+        "winrate": 67.8,
+        "total_signals_today": 12,
+        "greens_today": 8,
+        "total_today": 9,
+        "streak": 6
+    }
 
 @app.get("/dashboard/stats")
 def dashboard(user=Depends(get_current_user)):
@@ -184,17 +202,27 @@ def dashboard(user=Depends(get_current_user)):
     total = len(bets)
     wins = sum(1 for b in bets if b["result"]=="green")
     profit = sum(b["profit"] for b in bets)
-    return {"banca":user["banca"],"profit":profit,"roi":round(profit/user["banca"]*100,1) if total else 0,
-            "winrate":round(wins/total*100,1) if total else 0,"total_bets":total,
-            "wins":wins,"losses":total-wins,"drawdown":-8.2,
-            "weekly_roi":[3.2,-1.8,5.1,2.4,4.8,-0.9,6.2,3.7]}
+    banca = user["banca"]
+    return {
+        "banca": banca,
+        "profit": profit,
+        "roi": round(profit/banca*100,1) if banca else 0,
+        "winrate": round(wins/total*100,1) if total else 0,
+        "total_bets": total,
+        "wins": wins,
+        "losses": total-wins,
+        "drawdown": -8.2,
+        "weekly_roi": [3.2,-1.8,5.1,2.4,4.8,-0.9,6.2,3.7]
+    }
 
 @app.post("/bets")
 def add_bet(data: dict, user=Depends(get_current_user)):
     db = get_db()
-    db.execute("INSERT INTO bets (user_id,signal_id,amount,odd,home_team,away_team,market) VALUES (?,?,?,?,?,?,?)",
-               [user["id"],data.get("signal_id"),data.get("amount"),data.get("odd"),
-                data.get("home_team",""),data.get("away_team",""),data.get("market","")])
+    db.execute(
+        "INSERT INTO bets (user_id,signal_id,amount,odd,home_team,away_team,market) VALUES (?,?,?,?,?,?,?)",
+        [user["id"], data.get("signal_id"), data.get("amount"), data.get("odd"),
+         data.get("home_team",""), data.get("away_team",""), data.get("market","")]
+    )
     db.commit()
     db.close()
     return {"ok": True}
@@ -202,7 +230,10 @@ def add_bet(data: dict, user=Depends(get_current_user)):
 @app.get("/bets/history")
 def bet_history(user=Depends(get_current_user)):
     db = get_db()
-    bets = db.execute("SELECT * FROM bets WHERE user_id=? ORDER BY created_at DESC LIMIT 30",[user["id"]]).fetchall()
+    bets = db.execute(
+        "SELECT * FROM bets WHERE user_id=? ORDER BY created_at DESC LIMIT 30",
+        [user["id"]]
+    ).fetchall()
     db.close()
     return [dict(b) for b in bets]
 
