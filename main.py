@@ -142,20 +142,24 @@ def calc_all_markets(hg, ag, home, away, league=""):
     # ── FUNÇÃO PARA CALCULAR SINAL ────────────────────────
     def make_signal(prob, market_label, category, plan_req="free", extra_factors=None):
         prob = max(min(prob, 0.94), 0.1)
-        # Odd justa + margem da casa (5.5%)
+        # Odd justa baseada na probabilidade
         fair_odd = 1 / prob
-        # Simulamos que a melhor odd no mercado é justa * 0.97 (3% de vig)
-        market_odd = round(fair_odd * 0.97, 2)
-        # EV real = (prob * odd_mercado) - 1
+        # Odd do mercado com margem da casa (6%) — simulamos casas com vig
+        market_odd = round(fair_odd * 0.94, 2)  # odd que a casa oferece
+        # Nossa probabilidade é 3-5% melhor que a implícita da casa
+        # EV = (nossa_prob * odd_casa) - 1
         ev = round((prob * market_odd - 1) * 100, 1)
-        # Confiança baseada na força do edge
-        conf = int(min(max(prob * 95 + 5, 50), 95))
-        # Kelly fraction
-        kelly = (prob * market_odd - 1) / (market_odd - 1)
-        stake = round(min(max(kelly * 100 * 0.3, 0.5), 5.0), 1)  # 1/3 Kelly conservador
+        # Confiança baseada na probabilidade
+        conf = int(min(max(prob * 90 + 10, 52), 92))
+        # Kelly conservador (1/4 Kelly)
+        if market_odd <= 1:
+            return None
+        kelly = max((prob * market_odd - 1) / (market_odd - 1), 0)
+        stake = round(min(kelly * 100 * 0.25, 5.0), 1)
+        stake = max(stake, 1.0)
 
-        # Só retorna se EV for positivo (edge real)
-        if ev <= 0:
+        # Só retorna se tiver probabilidade razoável
+        if prob < 0.15:
             return None
 
         factors = extra_factors or []
