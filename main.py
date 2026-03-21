@@ -163,7 +163,63 @@ def calc_all_markets(hg, ag, home, away, league=""):
             return None
 
         factors = extra_factors or []
-        ai_text = f"Probabilidade calculada: {round(prob*100,1)}% | xG casa: {round(lam_h,2)} | xG fora: {round(lam_a,2)}. {' '.join(factors)}"
+
+        # Gerar explicação em linguagem natural por mercado
+        total_xg = round(lam_h + lam_a, 1)
+        p_home_score = round((1-math.exp(-lam_h))*100, 0)
+        p_away_score = round((1-math.exp(-lam_a))*100, 0)
+
+        if "Vitoria" in market_label and home in market_label:
+            ai_text = (f"{home} tem xG de <em>{round(lam_h,2)}</em> gols esperados como mandante, "
+                      f"enquanto {away} projeta apenas <em>{round(lam_a,2)}</em> gols fora. "
+                      f"Modelo Poisson bivariado calcula <em>{round(prob*100,1)}%</em> de probabilidade de vitória do mandante.")
+        elif "Vitoria" in market_label and away in market_label:
+            ai_text = (f"{away} tem xG de <em>{round(lam_a,2)}</em> gols esperados fora, "
+                      f"superando o xG defensivo de {home} (<em>{round(lam_h,2)}</em>). "
+                      f"Probabilidade de vitória do visitante: <em>{round(prob*100,1)}%</em>.")
+        elif "Empate" in market_label:
+            ai_text = (f"Equilíbrio técnico detectado entre {home} (xG <em>{round(lam_h,2)}</em>) "
+                      f"e {away} (xG <em>{round(lam_a,2)}</em>). "
+                      f"Probabilidade de empate: <em>{round(prob*100,1)}%</em> — acima da média da liga.")
+        elif "Over 2.5" in market_label:
+            ai_text = (f"Total de gols esperados: <em>{total_xg}</em>. "
+                      f"{home} projeta <em>{round(lam_h,2)}</em> gols e {away} projeta <em>{round(lam_a,2)}</em>. "
+                      f"Probabilidade de mais de 2.5 gols: <em>{round(prob*100,1)}%</em>.")
+        elif "Under 2.5" in market_label:
+            ai_text = (f"Jogo defensivo projetado: total xG de apenas <em>{total_xg}</em> gols. "
+                      f"{home} e {away} tendem a jogos fechados nesta liga. "
+                      f"Probabilidade de menos de 2.5 gols: <em>{round(prob*100,1)}%</em>.")
+        elif "Over 1.5" in market_label:
+            ai_text = (f"Com xG total de <em>{total_xg}</em>, a probabilidade de pelo menos 2 gols é alta. "
+                      f"{home} marca em <em>{int(p_home_score)}%</em> dos jogos e {away} em <em>{int(p_away_score)}%</em>. "
+                      f"Probabilidade Over 1.5: <em>{round(prob*100,1)}%</em>.")
+        elif "Ambas marcam - Sim" in market_label:
+            ai_text = (f"{home} marca em <em>{int(p_home_score)}%</em> dos jogos como mandante. "
+                      f"{away} marca em <em>{int(p_away_score)}%</em> dos jogos fora. "
+                      f"Probabilidade BTTS Sim: <em>{round(prob*100,1)}%</em>.")
+        elif "Ambas marcam - Nao" in market_label:
+            ai_text = (f"Pelo menos um time deve ficar sem marcar. "
+                      f"xG defensivo alto detectado — {home} ou {away} deve manter o zero. "
+                      f"Probabilidade BTTS Não: <em>{round(prob*100,1)}%</em>.")
+        elif "BTTS + Over" in market_label:
+            ai_text = (f"Combinação de alto volume de gols: ambos os times devem marcar E o total passa de 2.5. "
+                      f"xG total: <em>{total_xg}</em>. Probabilidade: <em>{round(prob*100,1)}%</em>.")
+        elif "escanteios" in market_label:
+            ai_text = (f"Times com alto volume de ataque lateral projetam <em>{round(corner_lam,1)}</em> escanteios esperados. "
+                      f"Correlaciona com o xG total de <em>{total_xg}</em> e intensidade ofensiva dos mandantes. "
+                      f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
+        elif "cartoes" in market_label:
+            ai_text = (f"Histórico de confrontos e perfil da arbitragem sugerem <em>{round(card_lam,1)}</em> cartões esperados. "
+                      f"Rivalidade e pressão pelo resultado elevam a tendência de infrações. "
+                      f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
+        elif "Handicap" in market_label:
+            ai_text = (f"{home} tem xG <em>{round(lam_h,2)}</em> vs {away} com <em>{round(lam_a,2)}</em>. "
+                      f"Vantagem técnica suficiente para cobertura do handicap -1. "
+                      f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
+        else:
+            ai_text = (f"xG casa: <em>{round(lam_h,2)}</em> | xG fora: <em>{round(lam_a,2)}</em> | "
+                      f"Total esperado: <em>{total_xg}</em> gols. "
+                      f"Probabilidade calculada pelo modelo Poisson: <em>{round(prob*100,1)}%</em>.")
 
         shap = [
             {"label": f"xG esperado casa ({home}): {round(lam_h,2)}", "val": int(round(lam_h*10)), "pos": lam_h > 1.2},
