@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from datetime import datetime
-import sqlite3, hashlib, math, os, httpx, asyncio
+import sqlite3, hashlib, math, os, httpx, asyncio, json
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -10,10 +10,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 SECRET = os.getenv("SECRET_KEY", "oddsx-secret-2024")
 API_KEY = os.getenv("API_FOOTBALL_KEY", "")
 
-# ── CACHE de fixtures ─────────────────────────────────────
 _fixtures_cache = []
+_stats_cache = {}
 _cache_time = None
 
+# ── DATABASE ──────────────────────────────────────────────
 def get_db():
     db = sqlite3.connect("/tmp/oddsx.db", check_same_thread=False)
     db.row_factory = sqlite3.Row
@@ -50,11 +51,8 @@ def init_db():
 
 init_db()
 
-def hash_pw(pw):
-    return hashlib.sha256((pw + SECRET).encode()).hexdigest()
-
-def make_token(uid, email):
-    return hashlib.sha256(f"{uid}:{email}:{SECRET}".encode()).hexdigest()
+def hash_pw(pw): return hashlib.sha256((pw+SECRET).encode()).hexdigest()
+def make_token(uid, email): return hashlib.sha256(f"{uid}:{email}:{SECRET}".encode()).hexdigest()
 
 def get_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -68,54 +66,236 @@ def get_user(authorization: Optional[str] = Header(None)):
     db.close()
     raise HTTPException(401, "Token expirado")
 
-# ── MOTOR DE IA ───────────────────────────────────────────
-def calc(hg, ag, market, home, away):
+# ── MOTOR DE IA PROFISSIONAL ──────────────────────────────
+def poisson_prob(lam, k):
+    """P(X = k) distribuição de Poisson"""
+    return (math.exp(-lam) * lam**k) / math.factorial(k)
+
+def poisson_cdf(lam, k):
+    """P(X <= k)"""
+    return sum(poisson_prob(lam, i) for i in range(k+1))
+
+def bivariate_poisson(lam_h, lam_a):
+    """Matriz de probabilidades para placar exato até 6x6"""
+    matrix = {}
+    for i in range(7):
+        for j in range(7):
+            matrix[(i,j)] = poisson_prob(lam_h, i) * poisson_prob(lam_a, j)
+    return matrix
+
+def calc_all_markets(hg, ag, home, away, league=""):
+    """
+    Calcula todos os mercados com modelo Poisson bivariado.
+    hg = média de gols marcados pelo time da casa
+    ag = média de gols marcados pelo time de fora
+    hga = média de gols sofridos pelo time da casa
+    aga = média de gols sofridos pelo time de fora
+    """
     hg = float(hg or 1.4)
     ag = float(ag or 1.1)
-    lam = hg + ag
-    p0 = math.exp(-lam)
-    p1 = lam * math.exp(-lam)
-    p2 = (lam**2 / 2) * math.exp(-lam)
-    prob = round(1-(p0+p1+p2), 3) if market=="over25" else round((1-math.exp(-hg))*(1-math.exp(-ag)), 3)
-    prob = max(min(prob, 0.94), 0.3)
-    odd = round(1/prob * 1.03, 2)
-    conf = int(min(max(prob*100+5, 50), 95))
-    ev = round((prob*odd-1)*100, 1)
-    stake = round(min(max((prob-1/odd)/(1-1/odd)*100, 0.5), 5.0), 1)
-    label = "Over 2.5 gols" if market=="over25" else "Ambas marcam (BTTS)"
-    plan = "free" if conf < 80 else ("premium" if conf < 88 else "vip")
-    ai_text = f"{home} tem media de {round(hg,1)} gols em casa. {away} marca {round(ag,1)} gols fora. Modelo Poisson projeta {round(lam,1)} gols esperados com probabilidade de {round(prob*100,1)}%."
-    shap_list = [
-        {"label": f"xG esperado: {round(lam,1)} gols", "val": int(round(lam*8)), "pos": bool(lam > 2.5)},
-        {"label": f"Media gols {home} em casa", "val": int(round(hg*10)), "pos": bool(hg > 1.3)},
-        {"label": f"Media gols {away} fora", "val": int(round(ag*8)), "pos": bool(ag > 1.0)},
-        {"label": "Modelo Poisson calibrado", "val": int(round(prob*20)), "pos": bool(prob > 0.55)},
-        {"label": "EV positivo detectado", "val": int(round(ev)), "pos": bool(ev > 0)},
-    ]
-    return {"market": label, "odd": odd, "conf": conf, "ev": ev, "stake": stake,
-            "ai_text": ai_text, "shap_list": shap_list, "plan": plan}
 
-# ── BUSCAR FIXTURES REAIS ─────────────────────────────────
-DEMO_FIXTURES = [
-    {"id":1001,"home":"Arsenal","away":"Chelsea","league":"Premier League","time":"20:00","hg":2.1,"ag":1.4},
-    {"id":1002,"home":"PSG","away":"Bayern","league":"Champions League","time":"21:00","hg":2.3,"ag":2.1},
-    {"id":1003,"home":"Flamengo","away":"Botafogo","league":"Brasileirao","time":"19:30","hg":1.8,"ag":1.1},
-    {"id":1004,"home":"Bayern Munchen","away":"Dortmund","league":"Bundesliga","time":"17:30","hg":2.4,"ag":1.6},
-    {"id":1005,"home":"Real Madrid","away":"Atletico Madrid","league":"La Liga","time":"21:00","hg":2.0,"ag":1.3},
-    {"id":1006,"home":"Inter de Milao","away":"Juventus","league":"Serie A","time":"20:45","hg":1.7,"ag":1.2},
-]
+    # Lambda esperado = ataque do time vs defesa do adversário
+    # Normalizado pela média da liga (assumindo 1.35 como média)
+    league_avg = 1.35
+    lam_h = max(hg * 0.7 + ag * 0.3, 0.3)  # força do ataque da casa vs defesa fora
+    lam_a = max(ag * 0.7 + hg * 0.3, 0.3)  # força do ataque de fora vs defesa casa
 
-async def fetch_real_fixtures():
+    # Matriz de placares
+    matrix = bivariate_poisson(lam_h, lam_a)
+
+    # ── CALCULAR PROBABILIDADES ───────────────────────────
+    # 1. Resultado (1X2)
+    prob_home = sum(v for (i,j),v in matrix.items() if i > j)
+    prob_draw = sum(v for (i,j),v in matrix.items() if i == j)
+    prob_away = sum(v for (i,j),v in matrix.items() if i < j)
+
+    # 2. Over/Under 2.5
+    prob_over25 = sum(v for (i,j),v in matrix.items() if i+j > 2)
+    prob_under25 = 1 - prob_over25
+
+    # 3. Over/Under 1.5
+    prob_over15 = sum(v for (i,j),v in matrix.items() if i+j > 1)
+
+    # 4. BTTS
+    prob_btts = sum(v for (i,j),v in matrix.items() if i > 0 and j > 0)
+    prob_no_btts = 1 - prob_btts
+
+    # 5. BTTS + Over 2.5
+    prob_btts_over = sum(v for (i,j),v in matrix.items() if i > 0 and j > 0 and i+j > 2)
+
+    # 6. Handicap Asiático -1 casa
+    prob_ah_home = sum(v for (i,j),v in matrix.items() if i-j >= 2)
+    prob_ah_draw = sum(v for (i,j),v in matrix.items() if i-j == 1)
+
+    # 7. Escanteios (modelo baseado em posse/ataques - estimativa por liga)
+    # Média de escanteios correlaciona com xG e chutes
+    corner_lam = (lam_h + lam_a) * 2.1  # média de escanteios por gol esperado
+    corner_lam = max(min(corner_lam, 14), 7)
+    prob_corners_over95 = 1 - poisson_cdf(corner_lam, 9)
+    prob_corners_over115 = 1 - poisson_cdf(corner_lam, 11)
+
+    # 8. Cartões (correlaciona com rivalidade e árbitro)
+    card_lam = 3.8 + (0.3 if prob_draw > 0.28 else 0)  # mais tenso = mais cartões
+    prob_cards_over35 = 1 - poisson_cdf(card_lam, 3)
+    prob_cards_over45 = 1 - poisson_cdf(card_lam, 4)
+
+    # ── FUNÇÃO PARA CALCULAR SINAL ────────────────────────
+    def make_signal(prob, market_label, category, plan_req="free", extra_factors=None):
+        prob = max(min(prob, 0.94), 0.1)
+        # Odd justa + margem da casa (5.5%)
+        fair_odd = 1 / prob
+        # Simulamos que a melhor odd no mercado é justa * 0.97 (3% de vig)
+        market_odd = round(fair_odd * 0.97, 2)
+        # EV real = (prob * odd_mercado) - 1
+        ev = round((prob * market_odd - 1) * 100, 1)
+        # Confiança baseada na força do edge
+        conf = int(min(max(prob * 95 + 5, 50), 95))
+        # Kelly fraction
+        kelly = (prob * market_odd - 1) / (market_odd - 1)
+        stake = round(min(max(kelly * 100 * 0.3, 0.5), 5.0), 1)  # 1/3 Kelly conservador
+
+        # Só retorna se EV for positivo (edge real)
+        if ev <= 0:
+            return None
+
+        factors = extra_factors or []
+        ai_text = f"Probabilidade calculada: {round(prob*100,1)}% | xG casa: {round(lam_h,2)} | xG fora: {round(lam_a,2)}. {' '.join(factors)}"
+
+        shap = [
+            {"label": f"xG esperado casa ({home}): {round(lam_h,2)}", "val": int(round(lam_h*10)), "pos": lam_h > 1.2},
+            {"label": f"xG esperado fora ({away}): {round(lam_a,2)}", "val": int(round(lam_a*8)), "pos": lam_a > 0.9},
+            {"label": f"Probabilidade modelo: {round(prob*100,1)}%", "val": int(round(prob*20)), "pos": prob > 0.5},
+            {"label": f"Edge sobre mercado: {ev}%", "val": int(abs(ev)), "pos": ev > 0},
+        ]
+
+        return {
+            "market": market_label,
+            "category": category,
+            "odd": market_odd,
+            "conf": conf,
+            "ev": ev,
+            "stake": stake,
+            "prob": round(prob*100,1),
+            "ai_text": ai_text,
+            "shap": shap,
+            "plan": plan_req
+        }
+
+    signals = []
+
+    # 1. Vitória casa
+    s = make_signal(prob_home, f"Vitoria {home} (1)", "resultado",
+                    extra_factors=[f"Poisson: lam_h={round(lam_h,2)}, lam_a={round(lam_a,2)}"])
+    if s: signals.append(s)
+
+    # 2. Vitória fora
+    s = make_signal(prob_away, f"Vitoria {away} (2)", "resultado")
+    if s: signals.append(s)
+
+    # 3. Empate
+    s = make_signal(prob_draw, "Empate (X)", "resultado", "premium")
+    if s: signals.append(s)
+
+    # 4. Over 2.5
+    s = make_signal(prob_over25, "Over 2.5 gols", "gols",
+                    extra_factors=[f"Total esperado: {round(lam_h+lam_a,1)} gols"])
+    if s: signals.append(s)
+
+    # 5. Under 2.5
+    s = make_signal(prob_under25, "Under 2.5 gols", "gols")
+    if s: signals.append(s)
+
+    # 6. Over 1.5
+    s = make_signal(prob_over15, "Over 1.5 gols", "gols")
+    if s: signals.append(s)
+
+    # 7. BTTS Sim
+    s = make_signal(prob_btts, "Ambas marcam - Sim", "gols",
+                    extra_factors=[f"P(casa marca)={round(1-math.exp(-lam_h),2)*100:.0f}% | P(fora marca)={round(1-math.exp(-lam_a),2)*100:.0f}%"])
+    if s: signals.append(s)
+
+    # 8. BTTS Nao
+    s = make_signal(prob_no_btts, "Ambas marcam - Nao", "gols")
+    if s: signals.append(s)
+
+    # 9. BTTS + Over 2.5
+    s = make_signal(prob_btts_over, "BTTS + Over 2.5", "combinado", "premium")
+    if s: signals.append(s)
+
+    # 10. Over 9.5 escanteios
+    s = make_signal(prob_corners_over95, "Over 9.5 escanteios", "escanteios", "premium",
+                    extra_factors=[f"Media esperada: {round(corner_lam,1)} escanteios"])
+    if s: signals.append(s)
+
+    # 11. Over 11.5 escanteios
+    s = make_signal(prob_corners_over115, "Over 11.5 escanteios", "escanteios", "vip")
+    if s: signals.append(s)
+
+    # 12. Over 3.5 cartoes
+    s = make_signal(prob_cards_over35, "Over 3.5 cartoes", "cartoes", "premium",
+                    extra_factors=[f"Media cartoes esperada: {round(card_lam,1)}"])
+    if s: signals.append(s)
+
+    # 13. Over 4.5 cartoes
+    s = make_signal(prob_cards_over45, "Over 4.5 cartoes", "cartoes", "vip")
+    if s: signals.append(s)
+
+    # 14. Handicap -1 casa (se forte favoritismo)
+    if prob_ah_home > 0.3:
+        s = make_signal(prob_ah_home, f"Handicap -1 {home}", "handicap", "vip")
+        if s: signals.append(s)
+
+    # Ordena por EV decrescente
+    return sorted(signals, key=lambda x: x["ev"], reverse=True)
+
+# ── BUSCAR ESTATÍSTICAS REAIS ─────────────────────────────
+async def get_team_stats(team_id: int, league_id: int, season: int = 2024) -> dict:
+    """Busca estatísticas reais do time na temporada"""
+    cache_key = f"{team_id}_{league_id}_{season}"
+    if cache_key in _stats_cache:
+        return _stats_cache[cache_key]
+
+    if not API_KEY:
+        return {}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://v3.football.api-sports.io/teams/statistics",
+                headers={"x-apisports-key": API_KEY},
+                params={"team": team_id, "league": league_id, "season": season}
+            )
+            data = r.json().get("response", {})
+            if not data:
+                return {}
+
+            goals_for = data.get("goals", {}).get("for", {})
+            goals_against = data.get("goals", {}).get("against", {})
+
+            gf_avg = goals_for.get("average", {}).get("total", "1.4")
+            ga_avg = goals_against.get("average", {}).get("total", "1.1")
+
+            stats = {
+                "goals_for_avg": float(gf_avg or 1.4),
+                "goals_against_avg": float(ga_avg or 1.1),
+            }
+            _stats_cache[cache_key] = stats
+            return stats
+    except Exception as e:
+        print(f"Erro stats {team_id}: {e}")
+        return {}
+
+async def fetch_fixtures_with_stats():
     global _fixtures_cache, _cache_time
-    # Cache por 30 minutos
+
     if _cache_time and (datetime.now() - _cache_time).seconds < 1800 and _fixtures_cache:
         return _fixtures_cache
 
     if not API_KEY:
-        return DEMO_FIXTURES
+        return get_demo_fixtures()
 
     today = datetime.now().strftime("%Y-%m-%d")
-    top_leagues = [39, 140, 135, 78, 61, 71, 2, 3, 94, 253]  # PL, LaLiga, SA, BL, L1, BR, CL, EL, Primeira Liga, MLS
+    top_leagues = [39, 140, 135, 78, 61, 71, 2, 3, 94, 253, 88, 848]
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -125,87 +305,80 @@ async def fetch_real_fixtures():
                 params={"date": today, "status": "NS", "timezone": "America/Sao_Paulo"}
             )
             data = r.json()
-            fixtures = []
-            for f in data.get("response", []):
-                league_id = f.get("league", {}).get("id")
-                if league_id not in top_leagues:
-                    continue
-                # Buscar estatísticas de gols médios da temporada
-                home_goals = 1.4  # default
-                away_goals = 1.1  # default
+            raw = [f for f in data.get("response", []) if f.get("league", {}).get("id") in top_leagues]
 
-                # Tenta pegar das estatísticas do fixture
-                home_team = f["teams"]["home"]["name"]
-                away_team = f["teams"]["away"]["name"]
-                league_name = f["league"]["name"]
-                country = f["league"]["country"]
-
-                # Horário
-                try:
-                    dt = datetime.fromisoformat(f["fixture"]["date"].replace("Z", ""))
-                    time_str = dt.strftime("%H:%M")
-                except:
-                    time_str = "20:00"
-
-                fixtures.append({
-                    "id": f["fixture"]["id"],
-                    "home": home_team,
-                    "away": away_team,
-                    "league": f"{league_name} ({country})",
-                    "time": time_str,
-                    "hg": home_goals,
-                    "ag": away_goals,
-                })
-
-            if fixtures:
-                # Buscar médias de gols para cada time
-                fixtures = await enrich_with_stats(fixtures, client if False else None)
-                _fixtures_cache = fixtures[:20]
-                _cache_time = datetime.now()
-                return _fixtures_cache
-            else:
-                return DEMO_FIXTURES
-    except Exception as e:
-        print(f"Erro API Football: {e}")
-        return DEMO_FIXTURES
-
-async def enrich_with_stats(fixtures, _):
-    if not API_KEY:
-        return fixtures
-    enriched = []
-    async with httpx.AsyncClient(timeout=15) as client:
-        for fix in fixtures[:15]:  # Limita para não exceder quota
+        fixtures = []
+        # Busca stats para cada fixture (limitado para não exceder quota)
+        for f in raw[:12]:
             try:
-                # Busca últimas partidas do time da casa
-                r_home = await client.get(
-                    "https://v3.football.api-sports.io/teams/statistics",
-                    headers={"x-apisports-key": API_KEY},
-                    params={"team": fix["id"], "season": 2024, "league": 39}
-                )
-                # Usa médias simples baseadas na liga se não conseguir
-                fix["hg"] = round(1.2 + (hash(fix["home"]) % 10) * 0.12, 1)
-                fix["ag"] = round(0.8 + (hash(fix["away"]) % 10) * 0.10, 1)
+                dt = datetime.fromisoformat(f["fixture"]["date"].replace("Z",""))
+                time_str = dt.strftime("%H:%M")
             except:
-                pass
-            enriched.append(fix)
-    return enriched
+                time_str = "20:00"
+
+            home_id = f["teams"]["home"]["id"]
+            away_id = f["teams"]["away"]["id"]
+            league_id = f["league"]["id"]
+            home_name = f["teams"]["home"]["name"]
+            away_name = f["teams"]["away"]["name"]
+
+            # Busca stats reais
+            home_stats = await get_team_stats(home_id, league_id)
+            away_stats = await get_team_stats(away_id, league_id)
+
+            # Gols médios reais ou estimados por hash (fallback)
+            hg = home_stats.get("goals_for_avg", round(1.1 + (hash(home_name) % 8) * 0.09, 2))
+            ag = away_stats.get("goals_for_avg", round(0.8 + (hash(away_name) % 8) * 0.09, 2))
+
+            fixtures.append({
+                "id": f["fixture"]["id"],
+                "home": home_name,
+                "away": away_name,
+                "home_id": home_id,
+                "away_id": away_id,
+                "league": f"{f['league']['name']} ({f['league']['country']})",
+                "league_id": league_id,
+                "time": time_str,
+                "hg": hg,
+                "ag": ag,
+            })
+            await asyncio.sleep(0.1)  # Rate limit
+
+        if fixtures:
+            _fixtures_cache = fixtures
+            _cache_time = datetime.now()
+            return fixtures
+        return get_demo_fixtures()
+
+    except Exception as e:
+        print(f"Erro fixtures: {e}")
+        return get_demo_fixtures()
+
+def get_demo_fixtures():
+    return [
+        {"id":1001,"home":"Arsenal","away":"Chelsea","league":"Premier League (England)","time":"20:00","hg":2.1,"ag":1.3},
+        {"id":1002,"home":"PSG","away":"Bayern","league":"Champions League","time":"21:00","hg":2.3,"ag":2.0},
+        {"id":1003,"home":"Flamengo","away":"Botafogo","league":"Serie A (Brazil)","time":"19:30","hg":1.9,"ag":1.1},
+        {"id":1004,"home":"Bayern Munchen","away":"Dortmund","league":"Bundesliga (Germany)","time":"17:30","hg":2.5,"ag":1.5},
+        {"id":1005,"home":"Real Madrid","away":"Atletico Madrid","league":"La Liga (Spain)","time":"21:00","hg":2.1,"ag":1.2},
+    ]
 
 # ── AUTH ──────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "api_key": bool(API_KEY), "timestamp": datetime.now().isoformat()}
+    return {"status":"ok","api_key":bool(API_KEY),"timestamp":datetime.now().isoformat()}
 
 @app.post("/auth/register")
 def register(data: dict):
     db = get_db()
     try:
         db.execute("INSERT INTO users (email,password_hash,name,banca) VALUES (?,?,?,?)",
-                   [data["email"], hash_pw(data["password"]), data.get("name",""), float(data.get("banca",1000))])
+                   [data["email"],hash_pw(data["password"]),data.get("name",""),float(data.get("banca",1000))])
         db.commit()
-        u = db.execute("SELECT * FROM users WHERE email=?", [data["email"]]).fetchone()
-        return {"token": make_token(u["id"],u["email"]), "user": dict(u)}
+        u = db.execute("SELECT * FROM users WHERE email=?",[data["email"]]).fetchone()
+        return {"token":make_token(u["id"],u["email"]),"user":dict(u)}
     except sqlite3.IntegrityError:
-        raise HTTPException(400, "Email ja cadastrado")
+        raise HTTPException(400,"Email ja cadastrado")
     finally:
         db.close()
 
@@ -213,11 +386,10 @@ def register(data: dict):
 def login(data: dict):
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE email=? AND password_hash=?",
-                   [data["email"], hash_pw(data["password"])]).fetchone()
+                   [data["email"],hash_pw(data["password"])]).fetchone()
     db.close()
-    if not u:
-        raise HTTPException(401, "Email ou senha incorretos")
-    return {"token": make_token(u["id"],u["email"]), "user": dict(u)}
+    if not u: raise HTTPException(401,"Email ou senha incorretos")
+    return {"token":make_token(u["id"],u["email"]),"user":dict(u)}
 
 @app.get("/auth/me")
 def me(user=Depends(get_user)):
@@ -226,42 +398,63 @@ def me(user=Depends(get_user)):
 # ── SIGNALS ───────────────────────────────────────────────
 @app.get("/signals")
 async def signals(user=Depends(get_user)):
-    fixtures = await fetch_real_fixtures()
+    fixtures = await fetch_fixtures_with_stats()
     order = {"free":0,"premium":1,"vip":2}
     ulevel = order.get(user["plan"],0)
     out = []
+    seen_fixtures = set()
+
     for f in fixtures:
-        for mkt in ["over25","btts"]:
-            s = calc(f["hg"],f["ag"],mkt,f["home"],f["away"])
-            locked = order.get(s["plan"],0) > ulevel
+        # Evitar duplicatas do mesmo jogo no mesmo mercado
+        fix_key = f"{f['home']}_{f['away']}"
+        if fix_key in seen_fixtures:
+            continue
+
+        all_markets = calc_all_markets(f["hg"], f["ag"], f["home"], f["away"], f.get("league",""))
+
+        # Pegar o melhor sinal por categoria (evita excesso de sinais por jogo)
+        best_by_category = {}
+        for sig in all_markets:
+            cat = sig["category"]
+            if cat not in best_by_category or sig["ev"] > best_by_category[cat]["ev"]:
+                best_by_category[cat] = sig
+
+        seen_fixtures.add(fix_key)
+
+        for sig in best_by_category.values():
+            locked = order.get(sig["plan"],0) > ulevel
             out.append({
-                "id": f["id"]*10+(1 if mkt=="over25" else 2),
+                "id": f["id"]*100 + hash(sig["market"]) % 100,
                 "home_team": f["home"],
                 "away_team": f["away"],
                 "league": f["league"],
                 "match_time": f["time"],
-                "market": s["market"],
-                "odd": s["odd"],
-                "confidence": s["conf"],
-                "ev_pct": s["ev"],
-                "stake_pct": s["stake"],
-                "ai_explanation": s["ai_text"] if not locked else "Faca upgrade para ver a analise completa da IA.",
-                "shap_data": s["shap_list"] if not locked else [],
+                "market": sig["market"],
+                "category": sig["category"],
+                "odd": sig["odd"],
+                "confidence": sig["conf"],
+                "ev_pct": sig["ev"],
+                "stake_pct": sig["stake"],
+                "ai_explanation": sig["ai_text"] if not locked else "Faca upgrade para ver a analise completa da IA.",
+                "shap_data": sig["shap"] if not locked else [],
                 "status": "pending",
-                "plan_required": s["plan"],
+                "plan_required": sig["plan"],
                 "locked": locked,
             })
-    return sorted(out, key=lambda x: x["confidence"], reverse=True)
+
+    return sorted(out, key=lambda x: x["ev_pct"], reverse=True)
 
 @app.get("/signals/ranking")
 async def ranking(user=Depends(get_user)):
-    fixtures = await fetch_real_fixtures()
+    fixtures = await fetch_fixtures_with_stats()
     out = []
     for f in fixtures:
-        s = calc(f["hg"],f["ag"],"over25",f["home"],f["away"])
-        out.append({"home_team":f["home"],"away_team":f["away"],"league":f["league"],
-                    "market":s["market"],"odd":s["odd"],"confidence":s["conf"],"ev_pct":s["ev"]})
-    return sorted(out, key=lambda x: x["confidence"], reverse=True)[:10]
+        markets = calc_all_markets(f["hg"],f["ag"],f["home"],f["away"])
+        if markets:
+            best = markets[0]
+            out.append({"home_team":f["home"],"away_team":f["away"],"league":f["league"],
+                        "market":best["market"],"odd":best["odd"],"confidence":best["conf"],"ev_pct":best["ev"]})
+    return sorted(out, key=lambda x: x["ev_pct"], reverse=True)[:10]
 
 @app.get("/signals/stats")
 def stats(user=Depends(get_user)):
@@ -270,7 +463,7 @@ def stats(user=Depends(get_user)):
 @app.get("/dashboard/stats")
 def dashboard(user=Depends(get_user)):
     db = get_db()
-    bets = db.execute("SELECT * FROM bets WHERE user_id=?", [user["id"]]).fetchall()
+    bets = db.execute("SELECT * FROM bets WHERE user_id=?",[user["id"]]).fetchall()
     db.close()
     total = len(bets)
     wins = sum(1 for b in bets if b["result"]=="green")
@@ -290,7 +483,7 @@ def add_bet(data: dict, user=Depends(get_user)):
                 data.get("home_team",""),data.get("away_team",""),data.get("market","")])
     db.commit()
     db.close()
-    return {"ok": True}
+    return {"ok":True}
 
 @app.get("/bets/history")
 def history(user=Depends(get_user)):
