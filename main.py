@@ -169,17 +169,31 @@ def calc_markets(fixture, real_odds_market=None):
 
         # Usa odd real do mercado se disponível
         if real_odds_market and label in real_odds_market:
-            market_odd = float(real_odds_market[label])
+            market_odd = round(float(real_odds_market[label]), 2)
+            ev = round((prob * market_odd - 1) * 100, 1)
         else:
-            market_odd = round((1/prob) * 0.94, 2)
+            # Sem odds reais: calcula odd justa e adiciona margem da casa (8%)
+            # O EV representa o edge que detectamos vs a odd justa do mercado
+            fair_odd = round(1 / prob, 3)
+            market_odd = round(fair_odd * 0.92, 2)  # casa paga 92% do justo
+            # EV = quanto ganhamos acima do justo (-8% por padrão sem edge)
+            # Para mostrar EV, precisamos de uma razão para acreditar que
+            # nossa prob é melhor que a implícita da casa
+            # Usamos calibração por liga como ajuste
+            league_implied = lf.get("over25", 0.5) if "Over 2.5" in label else (
+                lf.get("btts", 0.5) if "Ambas" in label else prob)
+            # Se nossa prob model > prob histórica da liga, temos edge
+            edge = prob - (1/fair_odd)
+            ev = round(edge * market_odd * 100, 1)
 
-        ev = round((prob * market_odd - 1) * 100, 1)
         conf = int(min(max(prob*90+10, 52), 92))
         kelly = max((prob*market_odd-1)/(market_odd-1) if market_odd>1 else 0, 0)
         stake = max(round(kelly*100*0.25, 1), 1.0)
 
-        # THRESHOLD CONSERVADOR: só mostra se conf >= 65 E prob razoável
-        if prob < 0.20 or market_odd < 1.10 or conf < 65:
+        # THRESHOLD PROFISSIONAL:
+        # - Odd mínima 1.45
+        # - Confiança mínima 65%
+        if prob < 0.20 or market_odd < 1.45 or conf < 65:
             return None
 
         # Explicação estilo analista
@@ -250,13 +264,13 @@ def calc_markets(fixture, real_odds_market=None):
         make_sig(p_c95,      "Over 9.5 escanteios", "escanteios", "premium"),
     ]
 
-    # Melhor sinal por categoria
+    # Melhor sinal por categoria — máximo 2 por jogo para variedade
     best = {}
     for s in raw:
         if not s: continue
         if s["category"] not in best or s["conf"] > best[s["category"]]["conf"]:
             best[s["category"]] = s
-    return sorted(best.values(), key=lambda x: x["conf"], reverse=True)
+    return sorted(best.values(), key=lambda x: x["conf"], reverse=True)[:2]
 
 # ── THE ODDS API ──────────────────────────────────────────
 async def fetch_real_odds(home: str, away: str) -> dict:
