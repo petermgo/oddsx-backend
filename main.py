@@ -186,7 +186,7 @@ def calc_markets(fixture, real_odds_market=None):
         kelly = max((prob*market_odd-1)/(market_odd-1) if market_odd>1 else 0, 0)
         stake = max(round(kelly*100*0.25, 1), 1.0)
 
-        if prob < 0.20 or market_odd < 1.45 or conf < 65:
+        if prob < 0.18 or market_odd < 1.35 or conf < 60:
             return None
 
         if "Vitoria" in label and home in label:
@@ -326,15 +326,51 @@ async def fetch_fixtures():
         return _fixtures_cache
     if not API_KEY: return get_demo()
     today = datetime.now().strftime("%Y-%m-%d")
-    top = [39,140,135,78,61,71,2,3,94,253]
+    # Ligas cobertas — top europeias + brasileirão + copas
+    top = [
+        39,   # Premier League
+        140,  # La Liga
+        135,  # Serie A Italy
+        78,   # Bundesliga
+        61,   # Ligue 1
+        71,   # Serie A Brazil
+        72,   # Serie B Brazil
+        2,    # Champions League
+        3,    # Europa League
+        94,   # Primeira Liga Portugal
+        253,  # MLS
+        88,   # Eredivisie
+        144,  # Belgian Pro League
+        179,  # Scottish Premiership
+        203,  # Super Lig Turkey
+        218,  # Ligue 2
+        106,  # Ekstraklasa Poland
+        119,  # Superliga Denmark
+        113,  # Allsvenskan Sweden
+        848,  # UEFA Conference League
+        262,  # Liga MX
+        128,  # Argentine Primera
+        239,  # Chilean Primera
+        11,   # CONMEBOL Libertadores
+    ]
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get("https://v3.football.api-sports.io/fixtures",
                 headers={"x-apisports-key": API_KEY},
                 params={"date":today,"status":"NS","timezone":"America/Sao_Paulo"})
             raw = [f for f in r.json().get("response",[]) if f["league"]["id"] in top]
+            print(f"✅ Fixtures NS encontrados: {len(raw)} jogos")
+            # Se não encontrou jogos NS, tenta sem filtro de status
+            if not raw:
+                r2 = await c.get("https://v3.football.api-sports.io/fixtures",
+                    headers={"x-apisports-key": API_KEY},
+                    params={"date":today,"timezone":"America/Sao_Paulo"})
+                all_f = r2.json().get("response",[])
+                raw = [f for f in all_f if f["league"]["id"] in top and
+                       f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H"]]
+                print(f"✅ Fixtures (todos status) encontrados: {len(raw)} jogos")
         fixtures = []
-        for f in raw[:12]:
+        for f in raw[:30]:  # máximo 30 para não exceder quota
             try: t = datetime.fromisoformat(f["fixture"]["date"].replace("Z","")).strftime("%H:%M")
             except: t = "20:00"
             hid,aid,lid = f["teams"]["home"]["id"],f["teams"]["away"]["id"],f["league"]["id"]
