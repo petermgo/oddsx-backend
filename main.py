@@ -322,6 +322,10 @@ async def get_team_stats(team_id, league_id, season=2024):
 
 async def fetch_fixtures():
     global _fixtures_cache, _cache_time
+    # Invalida cache se mudou o dia
+    if _cache_time and _cache_time.date() != datetime.now().date():
+        _fixtures_cache = []
+        _cache_time = None
     if _cache_time and (datetime.now()-_cache_time).seconds < 1800 and _fixtures_cache:
         return _fixtures_cache
     if not API_KEY: return get_demo()
@@ -354,23 +358,31 @@ async def fetch_fixtures():
         11,   # CONMEBOL Libertadores
     ]
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
+        async with httpx.AsyncClient(timeout=20) as c:
+            # Busca TODOS os jogos do dia sem filtro de status
             r = await c.get("https://v3.football.api-sports.io/fixtures",
                 headers={"x-apisports-key": API_KEY},
-                params={"date":today,"status":"NS","timezone":"America/Sao_Paulo"})
-            raw = [f for f in r.json().get("response",[]) if f["league"]["id"] in top]
-            print(f"✅ Fixtures NS encontrados: {len(raw)} jogos")
-            # Se não encontrou jogos NS, tenta sem filtro de status
-            if not raw:
-                r2 = await c.get("https://v3.football.api-sports.io/fixtures",
-                    headers={"x-apisports-key": API_KEY},
-                    params={"date":today,"timezone":"America/Sao_Paulo"})
-                all_f = r2.json().get("response",[])
-                raw = [f for f in all_f if f["league"]["id"] in top and
-                       f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H"]]
-                print(f"✅ Fixtures (todos status) encontrados: {len(raw)} jogos")
+                params={"date":today,"timezone":"America/Sao_Paulo"})
+            all_resp = r.json().get("response",[])
+            print(f"Total jogos hoje: {len(all_resp)}")
+            # Filtra ligas e status não iniciados/em andamento
+            raw = [f for f in all_resp
+                   if f["league"]["id"] in top
+                   and f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]]
+            print(f"Jogos filtrados: {len(raw)}")
+
+        # Deduplica por fixture_id
+        seen_ids = set()
+        deduped = []
+        for f in raw:
+            fid = f["fixture"]["id"]
+            if fid not in seen_ids:
+                seen_ids.add(fid)
+                deduped.append(f)
+        raw = deduped
+
         fixtures = []
-        for f in raw[:30]:  # máximo 30 para não exceder quota
+        for f in raw[:30]:
             try: t = datetime.fromisoformat(f["fixture"]["date"].replace("Z","")).strftime("%H:%M")
             except: t = "20:00"
             hid,aid,lid = f["teams"]["home"]["id"],f["teams"]["away"]["id"],f["league"]["id"]
@@ -378,7 +390,7 @@ async def fetch_fixtures():
             hs  = await get_team_stats(hid, lid)
             as_ = await get_team_stats(aid, lid)
             odds = await fetch_real_odds(hn, an)
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
             fixtures.append({
                 "id": f["fixture"]["id"], "home":hn, "away":an,
                 "league": f"{f['league']['name']} ({f['league']['country']})",
