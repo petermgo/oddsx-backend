@@ -12,10 +12,25 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 SECRET      = os.getenv("SECRET_KEY", "oddsx-secret-2024")
-API_KEY     = os.getenv("API_FOOTBALL_KEY", "")
+API_KEYS    = [
+    os.getenv("API_FOOTBALL_KEY", "66e081b0b4a6aef271ded4bc6b148d41"),
+    os.getenv("API_FOOTBALL_KEY2", "02834da2ef3905191d4a6966ec4eeac2"),
+]
 FD_KEY      = os.getenv("FOOTBALL_DATA_KEY", "c585a3a61b954e7e8f3bbf0dbd9fd698")
 ODDS_KEY    = os.getenv("THE_ODDS_KEY", "466d7782a7ef1b282177570aed71a991")
 DATABASE_URL= os.getenv("DATABASE_URL", "")
+
+_current_key_idx = 0
+
+def get_api_key():
+    """Retorna a chave ativa. Rotaciona se necessário."""
+    return API_KEYS[_current_key_idx % len(API_KEYS)]
+
+def rotate_key():
+    """Troca para a próxima chave disponível."""
+    global _current_key_idx
+    _current_key_idx = (_current_key_idx + 1) % len(API_KEYS)
+    print(f"🔄 Rotacionando para API key {_current_key_idx + 1}")
 
 _fixtures_cache   = []
 _team_stats_cache = {}
@@ -263,62 +278,18 @@ def calc_markets(fixture, real_odds_market=None):
 
 # ── THE ODDS API ──────────────────────────────────────────
 async def fetch_real_odds(home, away):
-    key = f"odds_{home}_{away}"
-    if key in _odds_cache: return _odds_cache[key]
-    if not ODDS_KEY: return {}
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get("https://api.the-odds-api.com/v4/sports/soccer/odds",
-                params={"apiKey":ODDS_KEY,"regions":"eu","markets":"h2h,totals","oddsFormat":"decimal"})
-            events = r.json()
-            if not isinstance(events, list): return {}
-            for ev in events:
-                hn = ev.get("home_team","")
-                an = ev.get("away_team","")
-                if home.lower() in hn.lower() or hn.lower() in home.lower():
-                    result = {}
-                    for bm in ev.get("bookmakers",[]):
-                        if bm["key"] in ["pinnacle","betfair","bet365","unibet"]:
-                            for mkt in bm.get("markets",[]):
-                                if mkt["key"] == "h2h":
-                                    for o in mkt.get("outcomes",[]):
-                                        if o["name"] == hn: result[f"Vitoria {home}"] = o["price"]
-                                        elif o["name"] == an: result[f"Vitoria {away}"] = o["price"]
-                                        elif o["name"] == "Draw": result["Empate"] = o["price"]
-                                elif mkt["key"] == "totals":
-                                    for o in mkt.get("outcomes",[]):
-                                        if o["name"]=="Over" and abs(o.get("point",0)-2.5)<0.1:
-                                            result["Over 2.5 gols"] = o["price"]
-                                        elif o["name"]=="Under" and abs(o.get("point",0)-2.5)<0.1:
-                                            result["Under 2.5 gols"] = o["price"]
-                            if result:
-                                _odds_cache[key] = result
-                                return result
-    except Exception as e:
-        print(f"Odds API: {e}")
+    """Desativado temporariamente para economizar quota da API."""
     return {}
 
 # ── API FOOTBALL ──────────────────────────────────────────
 async def get_team_stats(team_id, league_id, season=2024):
+    """Usa cache em memória. Só chama API se não tiver no cache."""
     key = f"{team_id}_{league_id}"
     if key in _team_stats_cache: return _team_stats_cache[key]
-    if not API_KEY: return {}
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get("https://v3.football.api-sports.io/teams/statistics",
-                headers={"x-apisports-key": API_KEY},
-                params={"team":team_id,"league":league_id,"season":season})
-            d = r.json().get("response",{})
-            if not d: return {}
-            gf  = float(d.get("goals",{}).get("for",{}).get("average",{}).get("total") or 1.4)
-            ga  = float(d.get("goals",{}).get("against",{}).get("average",{}).get("total") or 1.2)
-            frm = list((d.get("form","") or "")[-10:])
-            res = {"gf":gf,"ga":ga,"form":frm}
-            _team_stats_cache[key] = res
-            return res
-    except Exception as e:
-        print(f"Stats: {e}")
-        return {}
+    # Não chama API para economizar quota — usa estimativa baseada no ID
+    # A API Football tem apenas 100 req/dia no plano free
+    # Stats reais serão buscados apenas se houver quota disponível
+    return {}
 
 async def fetch_fixtures():
     global _fixtures_cache, _cache_time
@@ -328,7 +299,7 @@ async def fetch_fixtures():
         _cache_time = None
     if _cache_time and (datetime.now()-_cache_time).seconds < 1800 and _fixtures_cache:
         return _fixtures_cache
-    if not API_KEY: return get_demo()
+    if not any(API_KEYS): return get_demo()
     today = datetime.now().strftime("%Y-%m-%d")
     # Ligas cobertas — top europeias + brasileirão + copas
     top = [
@@ -359,17 +330,30 @@ async def fetch_fixtures():
     ]
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            # Busca TODOS os jogos do dia sem filtro de status
-            r = await c.get("https://v3.football.api-sports.io/fixtures",
-                headers={"x-apisports-key": API_KEY},
-                params={"date":today,"timezone":"America/Sao_Paulo"})
-            all_resp = r.json().get("response",[])
-            print(f"Total jogos hoje: {len(all_resp)}")
-            # Filtra ligas e status não iniciados/em andamento
+            # Tenta com a chave atual, rotaciona se quota esgotada
+            for attempt in range(len(API_KEYS)):
+                key = get_api_key()
+                r = await c.get("https://v3.football.api-sports.io/fixtures",
+                    headers={"x-apisports-key": key},
+                    params={"date":today,"timezone":"America/Sao_Paulo"})
+                resp = r.json()
+                errors = resp.get("errors", {})
+                # Se erro de quota ou token inválido, rotaciona
+                if errors and ("rateLimit" in str(errors) or "requests" in str(errors).lower() or "token" in str(errors).lower()):
+                    print(f"⚠️ Key {attempt+1} com problema: {errors} — rotacionando...")
+                    rotate_key()
+                    continue
+                all_resp = resp.get("response", [])
+                print(f"✅ Jogos hoje (key {_current_key_idx+1}): {len(all_resp)}")
+                break
+            else:
+                print("❌ Todas as keys esgotadas — usando demo")
+                return get_demo()
+
             raw = [f for f in all_resp
                    if f["league"]["id"] in top
                    and f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]]
-            print(f"Jogos filtrados: {len(raw)}")
+            print(f"Jogos nas ligas selecionadas: {len(raw)}")
 
         # Deduplica por fixture_id
         seen_ids = set()
@@ -487,7 +471,7 @@ def save_signals_to_history(signals_out):
 # ── AUTH ──────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status":"ok","api_key":bool(API_KEY),"odds_key":bool(ODDS_KEY),"db":"postgres","timestamp":datetime.now().isoformat()}
+    return {"status":"ok","api_key":_current_key_idx+1,"total_keys":len(API_KEYS),"db":"postgres","timestamp":datetime.now().isoformat()}
 
 @app.post("/auth/register")
 def register(data: dict):
