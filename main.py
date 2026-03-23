@@ -39,15 +39,43 @@ _cache_time       = None
 
 # ── LEAGUE CALIBRATION ────────────────────────────────────
 LEAGUE_FACTORS = {
-    "Premier League":   {"over25": 0.54, "btts": 0.53, "corners_avg": 10.2},
-    "La Liga":          {"over25": 0.50, "btts": 0.50, "corners_avg": 9.8},
-    "Serie A":          {"over25": 0.50, "btts": 0.49, "corners_avg": 9.5},
-    "Bundesliga":       {"over25": 0.57, "btts": 0.55, "corners_avg": 10.5},
-    "Ligue 1":          {"over25": 0.49, "btts": 0.48, "corners_avg": 9.3},
-    "Serie A (Brazil)": {"over25": 0.43, "btts": 0.40, "corners_avg": 8.8},
-    "Champions League": {"over25": 0.52, "btts": 0.51, "corners_avg": 9.9},
-    "default":          {"over25": 0.50, "btts": 0.48, "corners_avg": 9.5},
+    # Tier 1 — dados confiáveis, alto volume de apostas
+    "Premier League":        {"over25": 0.54, "btts": 0.53, "corners_avg": 10.2, "tier": 1},
+    "La Liga":               {"over25": 0.50, "btts": 0.50, "corners_avg": 9.8,  "tier": 1},
+    "Serie A":               {"over25": 0.50, "btts": 0.49, "corners_avg": 9.5,  "tier": 1},
+    "Bundesliga":            {"over25": 0.57, "btts": 0.55, "corners_avg": 10.5, "tier": 1},
+    "Ligue 1":               {"over25": 0.49, "btts": 0.48, "corners_avg": 9.3,  "tier": 1},
+    "Champions League":      {"over25": 0.52, "btts": 0.51, "corners_avg": 9.9,  "tier": 1},
+    "Europa League":         {"over25": 0.51, "btts": 0.50, "corners_avg": 9.6,  "tier": 1},
+    "Conference League":     {"over25": 0.50, "btts": 0.49, "corners_avg": 9.4,  "tier": 1},
+    # Tier 2 — bons dados, mercado razoável
+    "Primeira Liga":         {"over25": 0.48, "btts": 0.47, "corners_avg": 9.1,  "tier": 2},
+    "Eredivisie":            {"over25": 0.58, "btts": 0.56, "corners_avg": 10.0, "tier": 2},
+    "Pro League":            {"over25": 0.55, "btts": 0.53, "corners_avg": 10.1, "tier": 2},
+    "Super Lig":             {"over25": 0.52, "btts": 0.50, "corners_avg": 9.7,  "tier": 2},
+    "Scottish":              {"over25": 0.53, "btts": 0.51, "corners_avg": 9.5,  "tier": 2},
+    "Libertadores":          {"over25": 0.48, "btts": 0.46, "corners_avg": 8.9,  "tier": 2},
+    "Serie A (Brazil)":      {"over25": 0.43, "btts": 0.40, "corners_avg": 8.8,  "tier": 2},
+    "Serie B (Brazil)":      {"over25": 0.41, "btts": 0.38, "corners_avg": 8.5,  "tier": 2},
+    "Liga Profesional":      {"over25": 0.47, "btts": 0.45, "corners_avg": 8.7,  "tier": 2},
+    "Liga MX":               {"over25": 0.46, "btts": 0.44, "corners_avg": 8.8,  "tier": 2},
+    "MLS":                   {"over25": 0.50, "btts": 0.49, "corners_avg": 9.2,  "tier": 2},
+    # Tier 3 — dados menos confiáveis (ligas menores, feminino, sub-20)
+    "default":               {"over25": 0.48, "btts": 0.46, "corners_avg": 9.0,  "tier": 3},
 }
+
+# Ligas que devem ser EXCLUÍDAS (feminino, sub-20/sub-23, ligas de qualidade duvidosa)
+EXCLUDED_KEYWORDS = [
+    "women", "woman", "femenin", "femeni", "feminil", "female",
+    "u20", "u21", "u23", "u17", "u18", "u19", "under-20", "under-23",
+    "junior", "youth", "reserves", "reserva", "b team",
+    "syria", "armenia", "kosovo", "moldova", "belarus",
+    "faroe", "san marino", "gibraltar", "andorra", "liechtenstein",
+]
+
+def is_excluded_league(league: str) -> bool:
+    league_lower = league.lower()
+    return any(kw in league_lower for kw in EXCLUDED_KEYWORDS)
 
 def get_lf(league):
     for k in LEAGUE_FACTORS:
@@ -201,49 +229,63 @@ def calc_markets(fixture, real_odds_market=None):
         kelly = max((prob*market_odd-1)/(market_odd-1) if market_odd>1 else 0, 0)
         stake = max(round(kelly*100*0.25, 1), 1.0)
 
-        if prob < 0.18 or market_odd < 1.35 or conf < 60:
+        # Threshold por tier da liga
+        tier = lf.get("tier", 3)
+        min_conf = 68 if tier == 1 else 70 if tier == 2 else 73
+        min_odd  = 1.40 if tier == 1 else 1.45 if tier == 2 else 1.50
+
+        if prob < 0.18 or market_odd < min_odd or conf < min_conf:
             return None
 
+        # Contexto de forma — sequência recente
+        h_wins_recent = sum(1 for r in h_form[-3:] if r=="W")
+        a_wins_recent = sum(1 for r in a_form[-3:] if r=="W")
+        h_streak_ctx = f"venceu {h_wins_recent} dos últimos 3 jogos" if h_form else "forma desconhecida"
+        a_streak_ctx = f"venceu {a_wins_recent} dos últimos 3 jogos" if a_form else "forma desconhecida"
+
         if "Vitoria" in label and home in label:
-            ai = (f"{home} joga em casa com xG de <em>{lh}</em> gols/jogo. "
+            ai = (f"{home} joga em casa com xG de <em>{lh}</em> gols/jogo e <em>{h_streak_ctx}</em>. "
                   f"Forma recente: <em>{hfs}</em>. "
                   f"{away} visita com xG de <em>{la}</em>, sofrendo <em>{aga}</em> gols/jogo fora. "
                   f"Modelo aponta <em>{round(prob*100,1)}%</em> de vitória do mandante.")
         elif "Vitoria" in label and away in label:
-            ai = (f"{away} visita com xG de <em>{la}</em> gols/jogo fora. "
-                  f"Forma recente visitante: <em>{afs}</em>. "
+            ai = (f"{away} chega como visitante com xG de <em>{la}</em> e <em>{a_streak_ctx}</em>. "
+                  f"Forma recente: <em>{afs}</em>. "
                   f"{home} sofre <em>{hga}</em> gols/jogo em casa. "
                   f"Probabilidade de vitória fora: <em>{round(prob*100,1)}%</em>.")
         elif "Empate" in label:
-            ai = (f"Equilíbrio entre {home} (xG <em>{lh}</em>) e {away} (xG <em>{la}</em>). "
+            ai = (f"Equilíbrio técnico: {home} (xG <em>{lh}</em>, {h_streak_ctx}) "
+                  f"vs {away} (xG <em>{la}</em>, {a_streak_ctx}). "
                   f"Forma: <em>{hfs}</em> vs <em>{afs}</em>. "
-                  f"Prob empate: <em>{round(prob*100,1)}%</em>.")
+                  f"Probabilidade de empate: <em>{round(prob*100,1)}%</em>.")
         elif "Over 2.5" in label:
-            ai = (f"xG total: <em>{total}</em> ({home}: {lh} + {away}: {la}). "
+            ai = (f"xG total projetado: <em>{total}</em> gols ({home}: {lh} + {away}: {la}). "
+                  f"{home} <em>{h_streak_ctx}</em>; {away} <em>{a_streak_ctx}</em>. "
                   f"Histórico da liga: <em>{round(lf['over25']*100,0):.0f}%</em> dos jogos terminam Over 2.5. "
-                  f"Forma mandante: <em>{hfs}</em>. Probabilidade: <em>{round(prob*100,1)}%</em>.")
+                  f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
         elif "Under 2.5" in label:
             ai = (f"Perfil defensivo: xG total de apenas <em>{total}</em>. "
-                  f"{home} sofre <em>{hga}</em>/jogo; {away} marca apenas <em>{ag}</em> fora. "
-                  f"Na liga, <em>{round((1-lf['over25'])*100,0):.0f}%</em> ficam Under 2.5. "
+                  f"{home} sofre <em>{hga}</em>/jogo; {away} marca <em>{ag}</em> fora. "
+                  f"Na liga, <em>{round((1-lf['over25'])*100,0):.0f}%</em> dos jogos ficam Under 2.5. "
                   f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
         elif "Over 1.5" in label:
             ai = (f"Com xG de <em>{total}</em>, ao menos 2 gols são esperados. "
-                  f"{home} marca em <em>{ph_pct}%</em> dos jogos; {away} em <em>{pa_pct}%</em>. "
+                  f"{home} marca em <em>{ph_pct}%</em> dos jogos em casa; {away} em <em>{pa_pct}%</em> fora. "
                   f"Probabilidade Over 1.5: <em>{round(prob*100,1)}%</em>.")
         elif "Ambas marcam - Sim" in label:
-            ai = (f"{home} marca em <em>{ph_pct}%</em> dos jogos em casa (média <em>{hg}</em>/jogo). "
-                  f"{away} marca em <em>{pa_pct}%</em> fora (média <em>{ag}</em>/jogo). "
-                  f"Taxa BTTS histórica da liga: <em>{round(lf['btts']*100,0):.0f}%</em>. "
+            ai = (f"{home} marca em <em>{ph_pct}%</em> dos jogos em casa (média <em>{hg}</em>/jogo, {h_streak_ctx}). "
+                  f"{away} marca em <em>{pa_pct}%</em> fora (média <em>{ag}</em>/jogo, {a_streak_ctx}). "
+                  f"Taxa BTTS da liga: <em>{round(lf['btts']*100,0):.0f}%</em>. "
                   f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
         elif "Ambas marcam - Nao" in label:
             ai = (f"Pelo menos um time deve ficar sem marcar. "
                   f"{home} sofre <em>{hga}</em>/jogo; {away} marca apenas <em>{ag}</em> fora. "
-                  f"Na liga, <em>{round((1-lf['btts'])*100,0):.0f}%</em> têm BTTS Não. "
+                  f"Na liga, <em>{round((1-lf['btts'])*100,0):.0f}%</em> dos jogos têm BTTS Não. "
                   f"Probabilidade: <em>{round(prob*100,1)}%</em>.")
         elif "escanteios" in label:
             ai = (f"Média da liga: <em>{lf['corners_avg']}</em> escanteios/jogo. "
-                  f"xG total <em>{total}</em> indica volume ofensivo acima da média. "
+                  f"xG total <em>{total}</em> indica volume ofensivo. "
+                  f"Ambos os times com perfil ofensivo ativo. "
                   f"Probabilidade Over 9.5: <em>{round(prob*100,1)}%</em>.")
         else:
             ai = f"xG: {lh} vs {la} | Total: {total} | Prob: {round(prob*100,1)}%"
@@ -354,9 +396,11 @@ async def fetch_fixtures():
                 print("❌ Todas as keys esgotadas — usando demo")
                 return get_demo()
 
-            raw = [f for f in all_resp
-                   if f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]]
-            print(f"Jogos disponíveis hoje: {len(raw)}")
+        # Filtra ligas excluídas (feminino, sub-20, ligas sem dados confiáveis)
+        raw = [f for f in all_resp
+               if f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]
+               and not is_excluded_league(f["league"]["name"] + " " + f["league"]["country"])]
+        print(f"Jogos disponíveis (após filtro): {len(raw)}")
 
         # Deduplica por fixture_id
         seen_ids = set()
