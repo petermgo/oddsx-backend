@@ -231,10 +231,10 @@ def calc_markets(fixture, real_odds_market=None):
 
         # Threshold por tier da liga
         tier = lf.get("tier", 3)
-        min_conf = 68 if tier == 1 else 70 if tier == 2 else 73
-        min_odd  = 1.40 if tier == 1 else 1.45 if tier == 2 else 1.50
+        min_conf = 60 if tier == 1 else 62 if tier == 2 else 65
+        min_odd  = 1.35 if tier == 1 else 1.38 if tier == 2 else 1.42
 
-        if prob < 0.18 or market_odd < min_odd or conf < min_conf:
+        if prob < 0.15 or market_odd < min_odd or conf < min_conf:
             return None
 
         # Contexto de forma — sequência recente
