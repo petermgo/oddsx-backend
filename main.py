@@ -351,9 +351,8 @@ async def fetch_fixtures():
                 return get_demo()
 
             raw = [f for f in all_resp
-                   if f["league"]["id"] in top
-                   and f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]]
-            print(f"Jogos nas ligas selecionadas: {len(raw)}")
+                   if f["fixture"]["status"]["short"] in ["NS","TBD","1H","HT","2H","BT"]]
+            print(f"Jogos disponíveis hoje: {len(raw)}")
 
         # Deduplica por fixture_id
         seen_ids = set()
