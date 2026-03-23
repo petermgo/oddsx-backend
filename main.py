@@ -58,6 +58,9 @@ LEAGUE_FACTORS = {
     "Serie A (Brazil)":      {"over25": 0.43, "btts": 0.40, "corners_avg": 8.8,  "tier": 2},
     "Serie B (Brazil)":      {"over25": 0.41, "btts": 0.38, "corners_avg": 8.5,  "tier": 2},
     "Liga Profesional":      {"over25": 0.47, "btts": 0.45, "corners_avg": 8.7,  "tier": 2},
+    "Liga Pro":              {"over25": 0.45, "btts": 0.43, "corners_avg": 8.5,  "tier": 2},
+    "Primera A":             {"over25": 0.46, "btts": 0.44, "corners_avg": 8.6,  "tier": 2},
+    "Primera B":             {"over25": 0.44, "btts": 0.42, "corners_avg": 8.4,  "tier": 2},
     "Liga MX":               {"over25": 0.46, "btts": 0.44, "corners_avg": 8.8,  "tier": 2},
     "MLS":                   {"over25": 0.50, "btts": 0.49, "corners_avg": 9.2,  "tier": 2},
     # Tier 3 — dados menos confiáveis (ligas menores, feminino, sub-20)
@@ -66,10 +69,12 @@ LEAGUE_FACTORS = {
 
 # Ligas que devem ser EXCLUÍDAS (feminino, sub-20/sub-23, ligas de qualidade duvidosa)
 EXCLUDED_KEYWORDS = [
-    "women", "woman", "femenin", "femeni", "feminil", "female",
-    "u20", "u21", "u23", "u17", "u18", "u19", "under-20", "under-23",
+    # Feminino
+    "women", "woman", "femenin", "femeni", "feminino", "feminil", "female", "(f)",
+    # Categorias de base
+    "u20", "u21", "u23", "u17", "u18", "u19", "under-20", "under-23", "sub-20", "sub-23",
     "junior", "youth", "reserves", "reserva", "b team",
-    "syria", "armenia", "kosovo", "moldova", "belarus",
+    # Ligas com dados muito ruins
     "faroe", "san marino", "gibraltar", "andorra", "liechtenstein",
 ]
 
@@ -413,7 +418,7 @@ async def fetch_fixtures():
         raw = deduped
 
         fixtures = []
-        for f in raw[:30]:
+        for f in raw[:50]:
             try: t = datetime.fromisoformat(f["fixture"]["date"].replace("Z","")).strftime("%H:%M")
             except: t = "20:00"
             hid,aid,lid = f["teams"]["home"]["id"],f["teams"]["away"]["id"],f["league"]["id"]
