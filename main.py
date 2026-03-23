@@ -272,9 +272,13 @@ def calc_markets(fixture, real_odds_market=None):
     best = {}
     for s in raw:
         if not s: continue
-        if s["category"] not in best or s["conf"] > best[s["category"]]["conf"]:
-            best[s["category"]] = s
-    return sorted(best.values(), key=lambda x: x["conf"], reverse=True)[:2]
+        cat = s["category"]
+        if cat not in best or s["conf"] > best[cat]["conf"]:
+            best[cat] = s
+    # Prioriza: resultado > gols > combinado > escanteios > cartoes
+    priority = {"resultado":0,"gols":1,"combinado":2,"escanteios":3,"cartoes":4,"handicap":5}
+    sorted_sigs = sorted(best.values(), key=lambda x: (priority.get(x["category"],9), -x["conf"]))
+    return sorted_sigs[:2]
 
 # ── THE ODDS API ──────────────────────────────────────────
 async def fetch_real_odds(home, away):
